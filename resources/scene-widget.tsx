@@ -3,7 +3,6 @@ import { McpUseProvider, useWidget, type WidgetMetadata } from "mcp-use/react";
 import { z } from "zod";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import { CSS2DRenderer, CSS2DObject } from "three/examples/jsm/renderers/CSS2DRenderer.js";
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -85,7 +84,6 @@ export default function SceneWidget() {
   const cameraRef    = useRef<THREE.PerspectiveCamera | null>(null);
   const sceneRef     = useRef<THREE.Scene | null>(null);
   const controlsRef  = useRef<OrbitControls | null>(null);
-  const labelRendRef = useRef<CSS2DRenderer | null>(null);
   const rafRef       = useRef<number>(0);
   const meshMapRef   = useRef<Record<string, THREE.Mesh>>({});
   const propsRef     = useRef<Props | null>(null);
@@ -151,7 +149,6 @@ export default function SceneWidget() {
     let scene: THREE.Scene | null = null;
     let camera: THREE.PerspectiveCamera | null = null;
     let controls: OrbitControls | null = null;
-    let labelRenderer: CSS2DRenderer | null = null;
     let observer: ResizeObserver | null = null;
     let onWindowResize: (() => void) | null = null;
 
@@ -160,7 +157,6 @@ export default function SceneWidget() {
       const ww = Math.max(1, Math.round(width));
       const hh = Math.max(1, Math.round(height));
       renderer.setSize(ww, hh, false);
-      labelRenderer?.setSize(ww, hh);
       camera.aspect = ww / hh;
       camera.updateProjectionMatrix();
     }
@@ -217,19 +213,9 @@ export default function SceneWidget() {
       controls.update();
       controlsRef.current = controls;
 
-      // CSS2DRenderer for labels
-      labelRenderer = new CSS2DRenderer();
-      labelRenderer.domElement.style.position = "absolute";
-      labelRenderer.domElement.style.inset = "0";
-      labelRenderer.domElement.style.pointerEvents = "none";
-      labelRenderer.domElement.style.zIndex = "2";
-      mount.appendChild(labelRenderer.domElement);
-      labelRendRef.current = labelRenderer;
-
       // Initial sizing + one render (helps environments that throttle rAF)
       resize(w, h);
       renderer.render(scene, camera);
-      labelRenderer.render(scene, camera);
 
       // Resize handling
       if (typeof ResizeObserver !== "undefined") {
@@ -255,7 +241,6 @@ export default function SceneWidget() {
         rafRef.current = requestAnimationFrame(animate);
         controls?.update();
         renderer?.render(scene!, camera!);
-        labelRenderer?.render(scene!, camera!);
       }
       animate();
     } catch (e) {
@@ -309,7 +294,6 @@ export default function SceneWidget() {
       renderer?.domElement.removeEventListener("click", onClick);
       controls?.dispose();
       renderer?.dispose();
-      labelRenderer?.domElement.remove();
       if (renderer?.domElement && renderer.domElement.parentElement === mount) {
         mount.removeChild(renderer.domElement);
       }
@@ -336,13 +320,6 @@ export default function SceneWidget() {
         for (const m of mesh.material) m.dispose();
       } else {
         mesh.material.dispose();
-      }
-      // Remove label children
-      for (const c of [...mesh.children]) {
-        if (c instanceof CSS2DObject) {
-          c.element?.remove?.();
-          mesh.remove(c);
-        }
       }
       scene.remove(mesh);
     }
@@ -376,34 +353,6 @@ export default function SceneWidget() {
       mesh.castShadow = true;
       mesh.receiveShadow = true;
       mesh.userData.id = id;
-
-      // Label
-      const labelDiv = document.createElement("div");
-      labelDiv.textContent = obj.name;
-      labelDiv.style.cssText = [
-        "color: white",
-        "background: rgba(0,0,0,0.6)",
-        "padding: 2px 6px",
-        "border-radius: 4px",
-        "font-size: 11px",
-        "font-family: monospace",
-        "pointer-events: none",
-        "white-space: nowrap",
-      ].join(";");
-
-      // Compute label offset based on geometry type
-      let labelY = 0;
-      switch (obj.type) {
-        case "box":      labelY = (obj.height / 2) * obj.scale.y + 10; break;
-        case "sphere":   labelY = obj.radius * obj.scale.y + 10; break;
-        case "cylinder": labelY = (obj.height / 2) * obj.scale.y + 10; break;
-        case "cone":     labelY = (obj.height / 2) * obj.scale.y + 10; break;
-        case "plane":    labelY = 15; break;
-      }
-
-      const label = new CSS2DObject(labelDiv);
-      label.position.set(0, labelY, 0);
-      mesh.add(label);
 
       scene.add(mesh);
       meshMapRef.current[id] = mesh;
@@ -444,10 +393,8 @@ export default function SceneWidget() {
     // Ensure we draw at least one frame after rebuilding (some hosts throttle rAF)
     const renderer = rendererRef.current;
     const camera = cameraRef.current;
-    const labelRenderer = labelRendRef.current;
     if (renderer && camera) {
       renderer.render(scene, camera);
-      labelRenderer?.render(scene, camera);
     }
   }, [isPending, props]);
 

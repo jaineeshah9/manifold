@@ -156,7 +156,9 @@ const server = new MCPServer({
 server.tool(
   {
     name: "get_scene_state",
-    description: "Return the full current scene graph as structured JSON — all objects, their geometry/position/scale/color, and connections",
+    description:
+      "Return the full current scene graph as structured JSON — all objects, their geometry/position/scale/color, and connections.\n\n" +
+      "Workflow: after you finish making scene changes (e.g. via add_object / update_object / connect / delete_object / clear_scene / execute_code), call get_scene_state once to render the final scene in the widget.",
     schema: z.object({}),
     annotations: { readOnlyHint: true },
     widget: { name: "scene-widget", invoking: "Loading scene...", invoked: "Scene ready" },
@@ -173,7 +175,9 @@ server.tool(
 server.tool(
   {
     name: "add_object",
-    description: "Add a new 3D object to the scene. Input is { type, params }. Server stores a persistent scene graph and returns the new object id.",
+    description:
+      "Add a new 3D object to the scene. Input is { type, params }. Server stores a persistent scene graph and returns the new object id.\n\n" +
+      "After you finish making object/scene edits for this user request, call get_scene_state once to show the updated scene (do multiple edits first, then show once).",
     schema: addObjectSchema,
   },
   async ({ type, params }) => {
@@ -227,7 +231,9 @@ server.tool(
 server.tool(
   {
     name: "update_object",
-    description: "Update an existing object by id. Input is { id, params } and all params fields are optional.",
+    description:
+      "Update an existing object by id. Input is { id, params } and all params fields are optional.\n\n" +
+      "After you finish making object/scene edits for this user request, call get_scene_state once to show the updated scene (do multiple edits first, then show once).",
     schema: updateObjectSchema,
   },
   async ({ id, params }) => {
@@ -265,7 +271,9 @@ server.tool(
 server.tool(
   {
     name: "delete_object",
-    description: "Remove an object from the scene by ID. Also removes any connections referencing this object.",
+    description:
+      "Remove an object from the scene by ID. Also removes any connections referencing this object.\n\n" +
+      "After you finish making object/scene edits for this user request, call get_scene_state once to show the updated scene (do multiple edits first, then show once).",
     schema: z.object({
       id: z.string().describe("Object ID to delete"),
     }),
@@ -292,7 +300,9 @@ server.tool(
 server.tool(
   {
     name: "connect",
-    description: "Snap one object's face to another object's face. The `from` object is repositioned so that face_a touches face_b of the `to` object.",
+    description:
+      "Snap one object's face to another object's face. The `from` object is repositioned so that face_a touches face_b of the `to` object.\n\n" +
+      "After you finish making object/scene edits for this user request, call get_scene_state once to show the updated scene (do multiple edits first, then show once).",
     schema: z.object({
       from_id: z.string().describe("ID of the object to reposition"),
       face_a: faceSchema.describe("Face on the from object"),
@@ -322,7 +332,9 @@ server.tool(
 server.tool(
   {
     name: "clear_scene",
-    description: "Remove all objects and connections from the scene and reset the ID counter",
+    description:
+      "Remove all objects and connections from the scene and reset the ID counter.\n\n" +
+      "After you finish making object/scene edits for this user request, call get_scene_state once to show the updated scene (do multiple edits first, then show once).",
     schema: z.object({}),
     annotations: { destructiveHint: true },
   },
@@ -340,30 +352,42 @@ server.tool(
 server.tool(
   {
     name: "execute_code",
-    description: "Escape hatch. Run JavaScript against the scene graph in a sandboxed vm (disabled by default). The sandbox exposes `scene` (a deep copy of the current state) and `helpers` ({ getHalfExtents, faceOffset }). Mutate `scene.objects` or `scene.connections` and the changes are merged back.",
+    description:
+      "Escape hatch. Run JavaScript against the scene graph in a sandboxed vm. The sandbox exposes `scene` (a deep copy of the current state) and `helpers` ({ getHalfExtents, faceOffset }). Mutate `scene.objects` or `scene.connections` and the changes are merged back.\n\n" +
+      "After you finish making object/scene edits for this user request, call get_scene_state once to show the updated scene (do multiple edits first, then show once).",
     schema: z.object({
       code: z.string().describe("JavaScript code to execute. Mutate `scene` to change the scene state."),
     }),
   },
   async ({ code }) => {
-    if (process.env.ENABLE_EXECUTE_CODE !== "true") {
-      return error(
-        "execute_code is disabled by default. Set ENABLE_EXECUTE_CODE=true to enable it (not recommended for production)."
-      );
-    }
-
-    const ctx = vm.createContext({
-      scene: structuredClone(sceneState),
-      helpers: { getHalfExtents, faceOffset },
-    });
-
     try {
+      const ctx = vm.createContext({
+        scene: structuredClone(sceneState),
+        helpers: { getHalfExtents, faceOffset },
+      });
+
       vm.runInContext(code, ctx, { timeout: 1000 });
+
+      // NOTE: Never store "contextified" vm objects in server state. They may not
+      // serialize/merge correctly across tool calls. Instead, pull a JSON snapshot
+      // out of the vm and parse it back into plain host objects.
+      const snapshotJson = vm.runInContext(
+        "JSON.stringify({ objects: scene?.objects ?? {}, connections: scene?.connections ?? [] })",
+        ctx,
+        { timeout: 1000 }
+      );
+
+      const snapshot = JSON.parse(String(snapshotJson)) as Partial<SceneState>;
       sceneState = {
-        objects: ctx.scene.objects ?? sceneState.objects,
-        connections: ctx.scene.connections ?? sceneState.connections,
+        objects: (snapshot.objects ?? {}) as SceneState["objects"],
+        connections: Array.isArray(snapshot.connections) ? snapshot.connections : [],
       };
-      return object({ result: "Code executed successfully" });
+
+      return object({
+        result: "Code executed successfully",
+        object_count: Object.keys(sceneState.objects).length,
+        connection_count: sceneState.connections.length,
+      });
     } catch (e) {
       return error(e instanceof Error ? e.message : String(e));
     }
