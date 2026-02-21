@@ -113,14 +113,16 @@ export default function SceneWidget() {
     // Distance needed so the scene fits in the vertical FOV, with padding
     const dist = Math.abs(maxDim / 2 / Math.tan(fovRad / 2)) * 1.8;
 
-    camera.position.set(
-      center.x + dist * 0.5,
-      center.y + dist * 0.4,
-      center.z + dist * 0.8,
-    );
+    const camPos = {
+      x: center.x + dist * 0.5,
+      y: center.y + dist * 0.4,
+      z: center.z + dist * 0.8,
+    };
+    camera.position.set(camPos.x, camPos.y, camPos.z);
     controls.target.copy(center);
     controls.update();
     camera.updateProjectionMatrix();
+    console.log("[scene-widget] fitCamera — center:", center, "| size:", size, "| maxDim:", maxDim.toFixed(1), "| dist:", dist.toFixed(1), "| camPos:", camPos);
   }
 
   // -------------------------------------------------------------------------
@@ -130,8 +132,9 @@ export default function SceneWidget() {
     const mount = mountRef.current;
     if (!mount) return;
 
-    const w = mount.clientWidth;
-    const h = mount.clientHeight;
+    const w = mount.clientWidth  || mount.offsetWidth  || 500;
+    const h = mount.clientHeight || mount.offsetHeight || 500;
+    console.log("[scene-widget] init — mount size:", w, "x", h);
 
     // Renderer
     const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -145,6 +148,7 @@ export default function SceneWidget() {
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x1a1a2e);
     sceneRef.current = scene;
+    console.log("[scene-widget] scene + renderer ready");
 
     // Camera
     const camera = new THREE.PerspectiveCamera(60, w / h, 1, 10000);
@@ -247,6 +251,7 @@ export default function SceneWidget() {
   // Rebuild effect — runs when props change (after isPending resolves)
   // -------------------------------------------------------------------------
   useEffect(() => {
+    console.log("[scene-widget] rebuild effect — isPending:", isPending, "| objects:", Object.keys(safeObjects).length, "| sceneReady:", !!sceneRef.current);
     if (isPending) return;
     const scene = sceneRef.current;
     if (!scene) return;
@@ -334,6 +339,7 @@ export default function SceneWidget() {
       scene.add(mesh);
       meshMapRef.current[id] = mesh;
     }
+    console.log("[scene-widget] meshes built:", Object.keys(meshMapRef.current).length);
 
     // Highlight selected object
     for (const [id, mesh] of Object.entries(meshMapRef.current)) {
@@ -358,6 +364,8 @@ export default function SceneWidget() {
     // Auto-fit camera: fire once when scene first gets objects, reset when it empties
     const hasMeshes = Object.keys(meshMapRef.current).length > 0;
     if (hasMeshes && !hasFitRef.current) {
+      // Force matrixWorld update so Box3.expandByObject gets correct world positions
+      scene.updateMatrixWorld(true);
       fitCamera();
       hasFitRef.current = true;
     } else if (!hasMeshes) {
@@ -373,19 +381,6 @@ export default function SceneWidget() {
     }
   }, [state?.selectedObjectId, selectedId]);
 
-  // -------------------------------------------------------------------------
-  // Loading state
-  // -------------------------------------------------------------------------
-  if (isPending) {
-    return (
-      <McpUseProvider autoSize>
-        <div style={{ height: 500, display: "flex", alignItems: "center", justifyContent: "center", background: "#1a1a2e", color: "white" }}>
-          <p style={{ fontFamily: "monospace" }}>Building scene...</p>
-        </div>
-      </McpUseProvider>
-    );
-  }
-
   const objectList = Object.values(safeObjects);
   const activeId = state?.selectedObjectId ?? selectedId;
 
@@ -399,7 +394,13 @@ export default function SceneWidget() {
         <div
           ref={mountRef}
           style={{ flex: 1, position: "relative", overflow: "hidden", background: "#1a1a2e" }}
-        />
+        >
+          {isPending && (
+            <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "white", zIndex: 10 }}>
+              <p style={{ fontFamily: "monospace" }}>Building scene...</p>
+            </div>
+          )}
+        </div>
 
         {/* Sidebar */}
         <div style={{
