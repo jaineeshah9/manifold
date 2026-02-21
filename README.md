@@ -26,3 +26,4 @@ To learn more about mcp-use and MCP:
 ```bash
 npm run deploy
 ```
+# manifold
