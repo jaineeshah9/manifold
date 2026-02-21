@@ -72,6 +72,8 @@ export default function SceneWidget() {
   const { props, isPending, state, setState, sendFollowUpMessage } =
     useWidget<Props, WidgetState>();
 
+  const [threeError, setThreeError] = useState<string | null>(null);
+
   // In the Inspector, the widget can mount before any tool has ever provided props.
   // Treat missing/partial props as an empty scene to avoid crashing.
   const safeObjects = (props as Props | undefined)?.objects ?? {};
@@ -132,83 +134,147 @@ export default function SceneWidget() {
     const mount = mountRef.current;
     if (!mount) return;
 
-    const w = mount.clientWidth  || mount.offsetWidth  || 500;
-    const h = mount.clientHeight || mount.offsetHeight || 500;
+    function getMountSize(el: HTMLElement) {
+      const rect = el.getBoundingClientRect();
+      const width = rect.width || el.clientWidth || el.offsetWidth || 500;
+      const height = rect.height || el.clientHeight || el.offsetHeight || 500;
+      return {
+        width: Number.isFinite(width) && width > 0 ? width : 500,
+        height: Number.isFinite(height) && height > 0 ? height : 500,
+      };
+    }
+
+    const { width: w, height: h } = getMountSize(mount);
     console.log("[scene-widget] init — mount size:", w, "x", h);
 
-    // Renderer
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setPixelRatio(window.devicePixelRatio);
-    renderer.setSize(w, h);
-    renderer.shadowMap.enabled = true;
-    mount.appendChild(renderer.domElement);
-    rendererRef.current = renderer;
+    let renderer: THREE.WebGLRenderer | null = null;
+    let scene: THREE.Scene | null = null;
+    let camera: THREE.PerspectiveCamera | null = null;
+    let controls: OrbitControls | null = null;
+    let labelRenderer: CSS2DRenderer | null = null;
+    let observer: ResizeObserver | null = null;
+    let onWindowResize: (() => void) | null = null;
 
-    // Scene
-    const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x1a1a2e);
-    sceneRef.current = scene;
-    console.log("[scene-widget] scene + renderer ready");
+    function resize(width: number, height: number) {
+      if (!renderer || !camera) return;
+      const ww = Math.max(1, Math.round(width));
+      const hh = Math.max(1, Math.round(height));
+      renderer.setSize(ww, hh, false);
+      labelRenderer?.setSize(ww, hh);
+      camera.aspect = ww / hh;
+      camera.updateProjectionMatrix();
+    }
 
-    // Camera
-    const camera = new THREE.PerspectiveCamera(60, w / h, 1, 10000);
-    camera.position.set(0, 200, 500);
-    cameraRef.current = camera;
-
-    // Lights
-    scene.add(new THREE.AmbientLight(0xffffff, 0.6));
-    const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
-    dirLight.position.set(200, 400, 300);
-    dirLight.castShadow = true;
-    scene.add(dirLight);
-
-    // Grid helper
-    const grid = new THREE.GridHelper(1000, 20, 0x444444, 0x333333);
-    scene.add(grid);
-
-    // OrbitControls
-    const controls = new OrbitControls(camera, renderer.domElement);
-    controls.enableDamping = true;
-    controls.dampingFactor = 0.05;
-    controlsRef.current = controls;
-
-    // CSS2DRenderer for labels
-    const labelRenderer = new CSS2DRenderer();
-    labelRenderer.setSize(w, h);
-    labelRenderer.domElement.style.position = "absolute";
-    labelRenderer.domElement.style.top = "0";
-    labelRenderer.domElement.style.left = "0";
-    labelRenderer.domElement.style.pointerEvents = "none";
-    mount.appendChild(labelRenderer.domElement);
-    labelRendRef.current = labelRenderer;
-
-    // Resize observer
-    const observer = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        const { width, height } = entry.contentRect;
-        renderer.setSize(width, height);
-        labelRenderer.setSize(width, height);
-        camera.aspect = width / height;
-        camera.updateProjectionMatrix();
+    try {
+      // Basic WebGL availability check (gives clearer error than Three's default)
+      const probe = document.createElement("canvas");
+      const gl = probe.getContext("webgl2") || probe.getContext("webgl") || probe.getContext("experimental-webgl");
+      if (!gl) {
+        setThreeError(
+          "WebGL context could not be created in this environment. If you're viewing this inside a sandboxed host, try opening the Inspector in a full browser window."
+        );
+        return;
       }
-    });
-    observer.observe(mount);
 
-    // Animation loop
-    function animate() {
-      rafRef.current = requestAnimationFrame(animate);
+      // Renderer
+      renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio ?? 1, 2));
+      renderer.shadowMap.enabled = true;
+      renderer.domElement.style.position = "absolute";
+      renderer.domElement.style.inset = "0";
+      renderer.domElement.style.width = "100%";
+      renderer.domElement.style.height = "100%";
+      renderer.domElement.style.display = "block";
+      mount.appendChild(renderer.domElement);
+      rendererRef.current = renderer;
+
+      // Scene
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x1a1a2e);
+      sceneRef.current = scene;
+
+      // Camera
+      camera = new THREE.PerspectiveCamera(60, w / h, 1, 10000);
+      camera.position.set(0, 200, 500);
+      cameraRef.current = camera;
+
+      // Lights
+      scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+      const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+      dirLight.position.set(200, 400, 300);
+      dirLight.castShadow = true;
+      scene.add(dirLight);
+
+      // Helpers
+      const grid = new THREE.GridHelper(1000, 20, 0x666666, 0x3a3a3a);
+      scene.add(grid);
+
+      // OrbitControls
+      controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.05;
+      controls.target.set(0, 0, 0);
       controls.update();
+      controlsRef.current = controls;
+
+      // CSS2DRenderer for labels
+      labelRenderer = new CSS2DRenderer();
+      labelRenderer.domElement.style.position = "absolute";
+      labelRenderer.domElement.style.inset = "0";
+      labelRenderer.domElement.style.pointerEvents = "none";
+      labelRenderer.domElement.style.zIndex = "2";
+      mount.appendChild(labelRenderer.domElement);
+      labelRendRef.current = labelRenderer;
+
+      // Initial sizing + one render (helps environments that throttle rAF)
+      resize(w, h);
       renderer.render(scene, camera);
       labelRenderer.render(scene, camera);
+
+      // Resize handling
+      if (typeof ResizeObserver !== "undefined") {
+        observer = new ResizeObserver((entries) => {
+          for (const entry of entries) {
+            const { width, height } = entry.contentRect;
+            // Avoid collapsing the renderer to 0x0 (some hosts report transient 0s)
+            if (width <= 0 || height <= 0) continue;
+            resize(width, height);
+          }
+        });
+        observer.observe(mount);
+      } else {
+        onWindowResize = () => {
+          const { width, height } = getMountSize(mount);
+          resize(width, height);
+        };
+        window.addEventListener("resize", onWindowResize);
+      }
+
+      // Animation loop
+      function animate() {
+        rafRef.current = requestAnimationFrame(animate);
+        controls?.update();
+        renderer?.render(scene!, camera!);
+        labelRenderer?.render(scene!, camera!);
+      }
+      animate();
+    } catch (e) {
+      setThreeError(e instanceof Error ? e.message : String(e));
+      return;
     }
-    animate();
 
     // Raycaster for clicks
     const raycaster = new THREE.Raycaster();
     const mouse = new THREE.Vector2();
 
     function onClick(e: MouseEvent) {
+      const renderer = rendererRef.current;
+      const camera = cameraRef.current;
+      const scene = sceneRef.current;
+      if (!renderer || !camera || !scene) return;
+
       const rect = renderer.domElement.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
       mouse.x =  ((e.clientX - rect.left) / rect.width)  * 2 - 1;
       mouse.y = -((e.clientY - rect.top)  / rect.height) * 2 + 1;
 
@@ -234,16 +300,19 @@ export default function SceneWidget() {
       }
     }
 
-    renderer.domElement.addEventListener("click", onClick);
+    renderer?.domElement.addEventListener("click", onClick);
 
     return () => {
       cancelAnimationFrame(rafRef.current);
-      observer.disconnect();
-      renderer.domElement.removeEventListener("click", onClick);
-      controls.dispose();
-      renderer.dispose();
-      labelRenderer.domElement.remove();
-      mount.removeChild(renderer.domElement);
+      observer?.disconnect();
+      if (onWindowResize) window.removeEventListener("resize", onWindowResize);
+      renderer?.domElement.removeEventListener("click", onClick);
+      controls?.dispose();
+      renderer?.dispose();
+      labelRenderer?.domElement.remove();
+      if (renderer?.domElement && renderer.domElement.parentElement === mount) {
+        mount.removeChild(renderer.domElement);
+      }
     };
   }, []);
 
@@ -371,6 +440,15 @@ export default function SceneWidget() {
     } else if (!hasMeshes) {
       hasFitRef.current = false;
     }
+
+    // Ensure we draw at least one frame after rebuilding (some hosts throttle rAF)
+    const renderer = rendererRef.current;
+    const camera = cameraRef.current;
+    const labelRenderer = labelRendRef.current;
+    if (renderer && camera) {
+      renderer.render(scene, camera);
+      labelRenderer?.render(scene, camera);
+    }
   }, [isPending, props]);
 
   // Sync selected highlight when state changes externally
@@ -395,6 +473,28 @@ export default function SceneWidget() {
           ref={mountRef}
           style={{ flex: 1, position: "relative", overflow: "hidden", background: "#1a1a2e" }}
         >
+          {threeError && (
+            <div
+              style={{
+                position: "absolute",
+                inset: 0,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                padding: 16,
+                color: "white",
+                background: "rgba(0,0,0,0.35)",
+                zIndex: 20,
+              }}
+            >
+              <div style={{ maxWidth: 360, fontSize: 12, lineHeight: 1.4 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8 }}>
+                  3D renderer unavailable
+                </div>
+                <div style={{ opacity: 0.9 }}>{threeError}</div>
+              </div>
+            </div>
+          )}
           {isPending && (
             <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "white", zIndex: 10 }}>
               <p style={{ fontFamily: "monospace" }}>Building scene...</p>
