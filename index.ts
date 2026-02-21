@@ -1,5 +1,7 @@
 import { MCPServer, object, text, widget, error } from "mcp-use/server";
 import { z } from "zod";
+import fs from "node:fs/promises";
+import path from "node:path";
 import vm from "node:vm";
 
 // ---------------------------------------------------------------------------
@@ -25,7 +27,58 @@ interface SceneState  { objects: Record<string, SceneObject>; connections: Conne
 
 let sceneState: SceneState = { objects: {}, connections: [] };
 let idCounter = 1;
+let sceneVersion = 0;
 function nextId() { return `obj_${idCounter++}`; }
+
+const persistedStatePath = path.join(process.cwd(), ".mcp-use", "scene-state.json");
+
+async function loadPersistedState() {
+  try {
+    const raw = await fs.readFile(persistedStatePath, "utf8");
+    const parsed = JSON.parse(raw) as Partial<{
+      sceneState: SceneState;
+      idCounter: number;
+      sceneVersion: number;
+    }>;
+
+    if (parsed.sceneState?.objects && parsed.sceneState?.connections) {
+      sceneState = parsed.sceneState;
+    }
+    if (typeof parsed.idCounter === "number" && Number.isFinite(parsed.idCounter) && parsed.idCounter >= 1) {
+      idCounter = Math.floor(parsed.idCounter);
+    } else {
+      // Best-effort inference from existing object IDs: obj_#
+      const nums = Object.keys(sceneState.objects)
+        .map((k) => (k.startsWith("obj_") ? Number(k.slice(4)) : NaN))
+        .filter((n) => Number.isFinite(n) && n >= 1) as number[];
+      const max = nums.length ? Math.max(...nums) : 0;
+      idCounter = Math.max(idCounter, max + 1);
+    }
+    if (typeof parsed.sceneVersion === "number" && Number.isFinite(parsed.sceneVersion) && parsed.sceneVersion >= 0) {
+      sceneVersion = Math.floor(parsed.sceneVersion);
+    }
+  } catch {
+    // ignore missing/invalid persisted state
+  }
+}
+
+async function persistState() {
+  try {
+    await fs.mkdir(path.dirname(persistedStatePath), { recursive: true });
+    await fs.writeFile(
+      persistedStatePath,
+      JSON.stringify({ sceneState, idCounter, sceneVersion }, null, 2),
+      "utf8"
+    );
+  } catch (e) {
+    console.warn("[manifold] Failed to persist scene state:", e);
+  }
+}
+
+async function commitState() {
+  sceneVersion += 1;
+  await persistState();
+}
 
 // ---------------------------------------------------------------------------
 // Geometry helpers
@@ -142,7 +195,7 @@ const server = new MCPServer({
   name: "manifold",
   title: "Manifold 3D Scene Builder",
   version: "1.0.0",
-  description: "Blender-style 3D scene builder powered by Three.js",
+  description: "Build and preview a simple 3D scene",
   baseUrl: process.env.MCP_URL || "http://localhost:3000",
   favicon: "favicon.ico",
   websiteUrl: "https://mcp-use.com",
@@ -157,14 +210,16 @@ server.tool(
   {
     name: "get_scene_state",
     description:
-      "Return the full current scene graph as structured JSON — all objects, their geometry/position/scale/color, and connections.\n\n" +
-      "Workflow: after you finish making scene changes (e.g. via add_object / update_object / connect / delete_object / clear_scene / execute_code), call get_scene_state once to render the final scene in the widget.",
+      "Show the current scene in the scene widget (and return scene JSON). Changes from other tools are not visible to the user until you call this.",
     schema: z.object({}),
     annotations: { readOnlyHint: true },
     widget: { name: "scene-widget", invoking: "Loading scene...", invoked: "Scene ready" },
   },
   async () => {
-    return widget({ props: sceneState, output: object(sceneState) });
+    return widget({
+      props: { ...sceneState, version: sceneVersion },
+      output: object({ ...sceneState, version: sceneVersion }),
+    });
   }
 );
 
@@ -175,9 +230,7 @@ server.tool(
 server.tool(
   {
     name: "add_object",
-    description:
-      "Add a new 3D object to the scene. Input is { type, params }. Server stores a persistent scene graph and returns the new object id.\n\n" +
-      "After you finish making object/scene edits for this user request, call get_scene_state once to show the updated scene (do multiple edits first, then show once).",
+    description: "Add an object to the scene state. Call get_scene_state to show it in the widget.",
     schema: addObjectSchema,
   },
   async ({ type, params }) => {
@@ -219,7 +272,11 @@ server.tool(
         break;
     }
 
-    sceneState.objects[id] = obj;
+    sceneState = {
+      ...sceneState,
+      objects: { ...sceneState.objects, [id]: obj },
+    };
+    await commitState();
     return object({ id });
   }
 );
@@ -231,9 +288,7 @@ server.tool(
 server.tool(
   {
     name: "update_object",
-    description:
-      "Update an existing object by id. Input is { id, params } and all params fields are optional.\n\n" +
-      "After you finish making object/scene edits for this user request, call get_scene_state once to show the updated scene (do multiple edits first, then show once).",
+    description: "Update an object in the scene state. Call get_scene_state to show it in the widget.",
     schema: updateObjectSchema,
   },
   async ({ id, params }) => {
@@ -245,18 +300,25 @@ server.tool(
         return error(`Invalid color "${color}". Use hex format e.g. #ff0000`);
       }
 
-      if (name !== undefined)     obj.name = name;
-      if (position !== undefined) obj.position = position;
-      if (scale !== undefined)    obj.scale = scale;
-      if (color !== undefined)    obj.color = color;
+      const nextObj: SceneObject = {
+        ...obj,
+        ...(name !== undefined ? { name } : null),
+        ...(position !== undefined ? { position } : null),
+        ...(scale !== undefined ? { scale } : null),
+        ...(color !== undefined ? { color } : null),
+      } as SceneObject;
 
       // Dimension updates — only apply if field exists on this geometry type
-      if (width !== undefined && "width" in obj)   (obj as { width: number }).width = width;
-      if (height !== undefined && "height" in obj) (obj as { height: number }).height = height;
-      if (depth !== undefined && "depth" in obj)   (obj as { depth: number }).depth = depth;
-      if (radius !== undefined && "radius" in obj) (obj as { radius: number }).radius = radius;
+      if (width !== undefined && "width" in nextObj)   (nextObj as { width: number }).width = width;
+      if (height !== undefined && "height" in nextObj) (nextObj as { height: number }).height = height;
+      if (depth !== undefined && "depth" in nextObj)   (nextObj as { depth: number }).depth = depth;
+      if (radius !== undefined && "radius" in nextObj) (nextObj as { radius: number }).radius = radius;
 
-      sceneState.objects[id] = obj;
+      sceneState = {
+        ...sceneState,
+        objects: { ...sceneState.objects, [id]: nextObj },
+      };
+      await commitState();
       return object({ id });
     } catch (e) {
       return error(e instanceof Error ? e.message : String(e));
@@ -271,9 +333,7 @@ server.tool(
 server.tool(
   {
     name: "delete_object",
-    description:
-      "Remove an object from the scene by ID. Also removes any connections referencing this object.\n\n" +
-      "After you finish making object/scene edits for this user request, call get_scene_state once to show the updated scene (do multiple edits first, then show once).",
+    description: "Delete an object (and its connections) from the scene state. Call get_scene_state to show it in the widget.",
     schema: z.object({
       id: z.string().describe("Object ID to delete"),
     }),
@@ -282,10 +342,12 @@ server.tool(
   async ({ id }) => {
     try {
       assertObject(id);
-      delete sceneState.objects[id];
-      sceneState.connections = sceneState.connections.filter(
-        (c) => c.from_id !== id && c.to_id !== id
-      );
+      const { [id]: _deleted, ...rest } = sceneState.objects;
+      sceneState = {
+        objects: rest,
+        connections: sceneState.connections.filter((c) => c.from_id !== id && c.to_id !== id),
+      };
+      await commitState();
       return text(`Deleted object "${id}"`);
     } catch (e) {
       return error(e instanceof Error ? e.message : String(e));
@@ -301,8 +363,7 @@ server.tool(
   {
     name: "connect",
     description:
-      "Snap one object's face to another object's face. The `from` object is repositioned so that face_a touches face_b of the `to` object.\n\n" +
-      "After you finish making object/scene edits for this user request, call get_scene_state once to show the updated scene (do multiple edits first, then show once).",
+      "Snap one object's face to another (updates position and records a connection). Call get_scene_state to show it in the widget.",
     schema: z.object({
       from_id: z.string().describe("ID of the object to reposition"),
       face_a: faceSchema.describe("Face on the from object"),
@@ -316,8 +377,11 @@ server.tool(
       const toObj   = assertObject(to_id);
 
       const newPos = computeConnectPos(fromObj, face_a, toObj, face_b);
-      sceneState.objects[from_id] = { ...fromObj, position: newPos };
-      sceneState.connections.push({ from_id, face_a, to_id, face_b });
+      sceneState = {
+        objects: { ...sceneState.objects, [from_id]: { ...fromObj, position: newPos } },
+        connections: [...sceneState.connections, { from_id, face_a, to_id, face_b }],
+      };
+      await commitState();
       return object({ from_id, new_position: newPos });
     } catch (e) {
       return error(e instanceof Error ? e.message : String(e));
@@ -333,14 +397,14 @@ server.tool(
   {
     name: "clear_scene",
     description:
-      "Remove all objects and connections from the scene and reset the ID counter.\n\n" +
-      "After you finish making object/scene edits for this user request, call get_scene_state once to show the updated scene (do multiple edits first, then show once).",
+      "Clear the entire scene (objects + connections) and reset IDs. Only call if the user explicitly wants to start over.",
     schema: z.object({}),
     annotations: { destructiveHint: true },
   },
   async () => {
     sceneState = { objects: {}, connections: [] };
     idCounter = 1;
+    await commitState();
     return text("Scene cleared");
   }
 );
@@ -353,8 +417,7 @@ server.tool(
   {
     name: "execute_code",
     description:
-      "Escape hatch. Run JavaScript against the scene graph in a sandboxed vm. The sandbox exposes `scene` (a deep copy of the current state) and `helpers` ({ getHalfExtents, faceOffset }). Mutate `scene.objects` or `scene.connections` and the changes are merged back.\n\n" +
-      "After you finish making object/scene edits for this user request, call get_scene_state once to show the updated scene (do multiple edits first, then show once).",
+      "Run sandboxed JavaScript to batch-edit the scene state (mutate `scene`, then it's merged back). Call get_scene_state to show it in the widget.",
     schema: z.object({
       code: z.string().describe("JavaScript code to execute. Mutate `scene` to change the scene state."),
     }),
@@ -382,6 +445,7 @@ server.tool(
         objects: (snapshot.objects ?? {}) as SceneState["objects"],
         connections: Array.isArray(snapshot.connections) ? snapshot.connections : [],
       };
+      await commitState();
 
       return object({
         result: "Code executed successfully",
@@ -396,6 +460,7 @@ server.tool(
 
 // ---------------------------------------------------------------------------
 
+await loadPersistedState();
 server.listen().then(() => {
   console.log("Manifold 3D Scene Builder running");
 });

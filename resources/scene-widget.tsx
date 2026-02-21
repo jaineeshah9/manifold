@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { McpUseProvider, useWidget, type WidgetMetadata } from "mcp-use/react";
 import { z } from "zod";
-import * as THREE from "three";
-import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import type * as THREEType from "three";
+import type { OrbitControls as OrbitControlsType } from "three/examples/jsm/controls/OrbitControls.js";
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -36,10 +36,11 @@ const propsSchema = z.object({
     to_id: z.string(),
     face_b: faceSchema,
   })),
+  version: z.number().optional(),
 });
 
 export const widgetMetadata: WidgetMetadata = {
-  description: "Interactive Three.js 3D scene — controlled by Claude",
+  description: "3D scene preview",
   props: propsSchema,
   exposeAsTool: false,
   metadata: { prefersBorder: false },
@@ -53,7 +54,7 @@ type WidgetState = { selectedObjectId?: string };
 // Geometry factory
 // ---------------------------------------------------------------------------
 
-function makeGeometry(obj: SceneObject): THREE.BufferGeometry {
+function makeGeometry(THREE: typeof import("three"), obj: SceneObject): THREEType.BufferGeometry {
   switch (obj.type) {
     case "box":      return new THREE.BoxGeometry(obj.width, obj.height, obj.depth);
     case "sphere":   return new THREE.SphereGeometry(obj.radius, 32, 32);
@@ -72,6 +73,11 @@ export default function SceneWidget() {
     useWidget<Props, WidgetState>();
 
   const [threeError, setThreeError] = useState<string | null>(null);
+  const [threeReady, setThreeReady] = useState(false);
+
+  // Load Three.js dynamically so a module-load failure doesn't blank the widget.
+  const threeRef = useRef<typeof import("three") | null>(null);
+  const orbitControlsCtorRef = useRef<(new (...args: any[]) => OrbitControlsType) | null>(null);
 
   // In the Inspector, the widget can mount before any tool has ever provided props.
   // Treat missing/partial props as an empty scene to avoid crashing.
@@ -80,12 +86,12 @@ export default function SceneWidget() {
 
   // Refs for Three.js objects that persist across renders
   const mountRef     = useRef<HTMLDivElement>(null);
-  const rendererRef  = useRef<THREE.WebGLRenderer | null>(null);
-  const cameraRef    = useRef<THREE.PerspectiveCamera | null>(null);
-  const sceneRef     = useRef<THREE.Scene | null>(null);
-  const controlsRef  = useRef<OrbitControls | null>(null);
+  const rendererRef  = useRef<THREEType.WebGLRenderer | null>(null);
+  const cameraRef    = useRef<THREEType.PerspectiveCamera | null>(null);
+  const sceneRef     = useRef<THREEType.Scene | null>(null);
+  const controlsRef  = useRef<OrbitControlsType | null>(null);
   const rafRef       = useRef<number>(0);
-  const meshMapRef   = useRef<Record<string, THREE.Mesh>>({});
+  const meshMapRef   = useRef<Record<string, THREEType.Mesh>>({});
   const propsRef     = useRef<Props | null>(null);
   // Track whether we've already auto-fit this scene; reset when scene clears
   const hasFitRef    = useRef<boolean>(false);
@@ -95,6 +101,8 @@ export default function SceneWidget() {
 
   // Fit camera to current scene meshes bounding box
   function fitCamera() {
+    const THREE = threeRef.current;
+    if (!THREE) return;
     const camera = cameraRef.current;
     const controls = controlsRef.current;
     if (!camera || !controls) return;
@@ -145,12 +153,15 @@ export default function SceneWidget() {
     const { width: w, height: h } = getMountSize(mount);
     console.log("[scene-widget] init — mount size:", w, "x", h);
 
-    let renderer: THREE.WebGLRenderer | null = null;
-    let scene: THREE.Scene | null = null;
-    let camera: THREE.PerspectiveCamera | null = null;
-    let controls: OrbitControls | null = null;
+    let cancelled = false;
+
+    let renderer: THREEType.WebGLRenderer | null = null;
+    let scene: THREEType.Scene | null = null;
+    let camera: THREEType.PerspectiveCamera | null = null;
+    let controls: OrbitControlsType | null = null;
     let observer: ResizeObserver | null = null;
     let onWindowResize: (() => void) | null = null;
+    let onClick: ((e: MouseEvent) => void) | null = null;
 
     function resize(width: number, height: number) {
       if (!renderer || !camera) return;
@@ -161,137 +172,158 @@ export default function SceneWidget() {
       camera.updateProjectionMatrix();
     }
 
-    try {
-      // Basic WebGL availability check (gives clearer error than Three's default)
-      const probe = document.createElement("canvas");
-      const gl = probe.getContext("webgl2") || probe.getContext("webgl") || probe.getContext("experimental-webgl");
-      if (!gl) {
-        setThreeError(
-          "WebGL context could not be created in this environment. If you're viewing this inside a sandboxed host, try opening the Inspector in a full browser window."
-        );
-        return;
-      }
+    (async () => {
+      try {
+        const [THREE, controlsMod] = await Promise.all([
+          import("three"),
+          import("three/examples/jsm/controls/OrbitControls.js"),
+        ]);
+        if (cancelled) return;
 
-      // Renderer
-      renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio ?? 1, 2));
-      renderer.shadowMap.enabled = true;
-      renderer.domElement.style.position = "absolute";
-      renderer.domElement.style.inset = "0";
-      renderer.domElement.style.width = "100%";
-      renderer.domElement.style.height = "100%";
-      renderer.domElement.style.display = "block";
-      mount.appendChild(renderer.domElement);
-      rendererRef.current = renderer;
+        threeRef.current = THREE;
+        orbitControlsCtorRef.current = controlsMod.OrbitControls as unknown as (new (...args: any[]) => OrbitControlsType);
 
-      // Scene
-      scene = new THREE.Scene();
-      scene.background = new THREE.Color(0x1a1a2e);
-      sceneRef.current = scene;
-
-      // Camera
-      camera = new THREE.PerspectiveCamera(60, w / h, 1, 10000);
-      camera.position.set(0, 200, 500);
-      cameraRef.current = camera;
-
-      // Lights
-      scene.add(new THREE.AmbientLight(0xffffff, 0.6));
-      const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
-      dirLight.position.set(200, 400, 300);
-      dirLight.castShadow = true;
-      scene.add(dirLight);
-
-      // Helpers
-      const grid = new THREE.GridHelper(1000, 20, 0x666666, 0x3a3a3a);
-      scene.add(grid);
-
-      // OrbitControls
-      controls = new OrbitControls(camera, renderer.domElement);
-      controls.enableDamping = true;
-      controls.dampingFactor = 0.05;
-      controls.target.set(0, 0, 0);
-      controls.update();
-      controlsRef.current = controls;
-
-      // Initial sizing + one render (helps environments that throttle rAF)
-      resize(w, h);
-      renderer.render(scene, camera);
-
-      // Resize handling
-      if (typeof ResizeObserver !== "undefined") {
-        observer = new ResizeObserver((entries) => {
-          for (const entry of entries) {
-            const { width, height } = entry.contentRect;
-            // Avoid collapsing the renderer to 0x0 (some hosts report transient 0s)
-            if (width <= 0 || height <= 0) continue;
-            resize(width, height);
-          }
-        });
-        observer.observe(mount);
-      } else {
-        onWindowResize = () => {
-          const { width, height } = getMountSize(mount);
-          resize(width, height);
-        };
-        window.addEventListener("resize", onWindowResize);
-      }
-
-      // Animation loop
-      function animate() {
-        rafRef.current = requestAnimationFrame(animate);
-        controls?.update();
-        renderer?.render(scene!, camera!);
-      }
-      animate();
-    } catch (e) {
-      setThreeError(e instanceof Error ? e.message : String(e));
-      return;
-    }
-
-    // Raycaster for clicks
-    const raycaster = new THREE.Raycaster();
-    const mouse = new THREE.Vector2();
-
-    function onClick(e: MouseEvent) {
-      const renderer = rendererRef.current;
-      const camera = cameraRef.current;
-      const scene = sceneRef.current;
-      if (!renderer || !camera || !scene) return;
-
-      const rect = renderer.domElement.getBoundingClientRect();
-      if (rect.width <= 0 || rect.height <= 0) return;
-      mouse.x =  ((e.clientX - rect.left) / rect.width)  * 2 - 1;
-      mouse.y = -((e.clientY - rect.top)  / rect.height) * 2 + 1;
-
-      raycaster.setFromCamera(mouse, camera);
-      const hits = raycaster.intersectObjects(scene.children, true);
-
-      // Find first hit that has an id in userData
-      for (const hit of hits) {
-        let obj: THREE.Object3D | null = hit.object;
-        while (obj) {
-          if (obj.userData.id) {
-            const id = obj.userData.id as string;
-            const sceneObj = propsRef.current?.objects[id];
-            if (sceneObj) {
-              setSelectedId(id);
-              setState((prev) => ({ ...(prev ?? {}), selectedObjectId: id }));
-              sendFollowUpMessage(`I clicked on "${sceneObj.name}" (id: ${id}, type: ${sceneObj.type})`);
-            }
-            return;
-          }
-          obj = obj.parent;
+        // Basic WebGL availability check (gives clearer error than Three's default)
+        const probe = document.createElement("canvas");
+        const gl =
+          probe.getContext("webgl2") ||
+          probe.getContext("webgl") ||
+          probe.getContext("experimental-webgl");
+        if (!gl) {
+          setThreeError("WebGL context could not be created in this environment.");
+          return;
         }
-      }
-    }
 
-    renderer?.domElement.addEventListener("click", onClick);
+        // Renderer
+        renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio ?? 1, 2));
+        renderer.shadowMap.enabled = true;
+        renderer.domElement.style.position = "absolute";
+        renderer.domElement.style.inset = "0";
+        renderer.domElement.style.width = "100%";
+        renderer.domElement.style.height = "100%";
+        renderer.domElement.style.display = "block";
+        mount.appendChild(renderer.domElement);
+        rendererRef.current = renderer;
+
+        // Scene
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x1a1a2e);
+        sceneRef.current = scene;
+
+        // Camera
+        camera = new THREE.PerspectiveCamera(60, w / h, 1, 10000);
+        camera.position.set(0, 200, 500);
+        cameraRef.current = camera;
+
+        // Lights
+        scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        dirLight.position.set(200, 400, 300);
+        dirLight.castShadow = true;
+        scene.add(dirLight);
+
+        // Helpers
+        const grid = new THREE.GridHelper(1000, 20, 0x666666, 0x3a3a3a);
+        scene.add(grid);
+
+        // OrbitControls
+        try {
+          const OrbitControlsCtor = orbitControlsCtorRef.current;
+          if (OrbitControlsCtor) {
+            controls = new OrbitControlsCtor(camera, renderer.domElement);
+            (controls as any).enableDamping = true;
+            (controls as any).dampingFactor = 0.05;
+            (controls as any).target?.set?.(0, 0, 0);
+            (controls as any).update?.();
+            controlsRef.current = controls;
+          }
+        } catch (e) {
+          console.warn("[scene-widget] OrbitControls init failed:", e);
+        }
+
+        // Initial sizing + one render (helps environments that throttle rAF)
+        resize(w, h);
+        renderer.render(scene, camera);
+
+        // Resize handling
+        if (typeof ResizeObserver !== "undefined") {
+          observer = new ResizeObserver((entries) => {
+            for (const entry of entries) {
+              const { width, height } = entry.contentRect;
+              // Avoid collapsing the renderer to 0x0 (some hosts report transient 0s)
+              if (width <= 0 || height <= 0) continue;
+              resize(width, height);
+            }
+          });
+          observer.observe(mount);
+        } else {
+          onWindowResize = () => {
+            const { width, height } = getMountSize(mount);
+            resize(width, height);
+          };
+          window.addEventListener("resize", onWindowResize);
+        }
+
+        // Raycaster for clicks
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+
+        onClick = (e: MouseEvent) => {
+          const renderer = rendererRef.current;
+          const camera = cameraRef.current;
+          const scene = sceneRef.current;
+          if (!renderer || !camera || !scene) return;
+
+          const rect = renderer.domElement.getBoundingClientRect();
+          if (rect.width <= 0 || rect.height <= 0) return;
+          mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+          mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+
+          raycaster.setFromCamera(mouse, camera);
+          const hits = raycaster.intersectObjects(scene.children, true);
+
+          for (const hit of hits) {
+            let obj: any = hit.object;
+            while (obj) {
+              if (obj.userData?.id) {
+                const id = obj.userData.id as string;
+                const sceneObj = propsRef.current?.objects[id];
+                if (sceneObj) {
+                  setSelectedId(id);
+                  setState((prev) => ({ ...(prev ?? {}), selectedObjectId: id }));
+                  sendFollowUpMessage(`I clicked on "${sceneObj.name}" (id: ${id}, type: ${sceneObj.type})`);
+                }
+                return;
+              }
+              obj = obj.parent;
+            }
+          }
+        };
+
+        renderer.domElement.addEventListener("click", onClick);
+
+        // Animation loop
+        function animate() {
+          rafRef.current = requestAnimationFrame(animate);
+          (controls as any)?.update?.();
+          renderer?.render(scene!, camera!);
+        }
+        animate();
+
+        setThreeReady(true);
+      } catch (e) {
+        if (cancelled) return;
+        setThreeError(e instanceof Error ? e.message : String(e));
+      }
+    })();
 
     return () => {
+      cancelled = true;
       cancelAnimationFrame(rafRef.current);
       observer?.disconnect();
       if (onWindowResize) window.removeEventListener("resize", onWindowResize);
-      renderer?.domElement.removeEventListener("click", onClick);
+      if (renderer && onClick) renderer.domElement.removeEventListener("click", onClick);
       controls?.dispose();
       renderer?.dispose();
       if (renderer?.domElement && renderer.domElement.parentElement === mount) {
@@ -304,6 +336,8 @@ export default function SceneWidget() {
   // Rebuild effect — runs when props change (after isPending resolves)
   // -------------------------------------------------------------------------
   useEffect(() => {
+    const THREE = threeRef.current;
+    if (!THREE) return;
     console.log("[scene-widget] rebuild effect — isPending:", isPending, "| objects:", Object.keys(safeObjects).length, "| sceneReady:", !!sceneRef.current);
     if (isPending) return;
     const scene = sceneRef.current;
@@ -341,7 +375,7 @@ export default function SceneWidget() {
 
     // Add objects
     for (const [id, obj] of Object.entries(safeObjects)) {
-      const geo = makeGeometry(obj);
+      const geo = makeGeometry(THREE, obj);
       const mat = new THREE.MeshStandardMaterial({
         color: new THREE.Color(obj.color),
         roughness: 0.6,
@@ -361,7 +395,7 @@ export default function SceneWidget() {
 
     // Highlight selected object
     for (const [id, mesh] of Object.entries(meshMapRef.current)) {
-      const mat = mesh.material as THREE.MeshStandardMaterial;
+      const mat = mesh.material as THREEType.MeshStandardMaterial;
       mat.emissive.set(id === (state?.selectedObjectId ?? selectedId) ? 0x334455 : 0x000000);
     }
 
@@ -401,7 +435,7 @@ export default function SceneWidget() {
   // Sync selected highlight when state changes externally
   useEffect(() => {
     for (const [id, mesh] of Object.entries(meshMapRef.current)) {
-      const mat = mesh.material as THREE.MeshStandardMaterial;
+      const mat = mesh.material as THREEType.MeshStandardMaterial;
       mat.emissive.set(id === (state?.selectedObjectId ?? selectedId) ? 0x334455 : 0x000000);
     }
   }, [state?.selectedObjectId, selectedId]);
@@ -440,6 +474,11 @@ export default function SceneWidget() {
                 </div>
                 <div style={{ opacity: 0.9 }}>{threeError}</div>
               </div>
+            </div>
+          )}
+          {!threeError && !threeReady && (
+            <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "white", zIndex: 10 }}>
+              <p style={{ fontFamily: "monospace" }}>Loading 3D engine...</p>
             </div>
           )}
           {isPending && (
@@ -483,7 +522,7 @@ export default function SceneWidget() {
               key={obj.id}
               onClick={() => {
                 setSelectedId(obj.id);
-            setState((prev) => ({ ...(prev ?? {}), selectedObjectId: obj.id }));
+                setState((prev) => ({ ...(prev ?? {}), selectedObjectId: obj.id }));
                 sendFollowUpMessage(`I selected "${obj.name}" (id: ${obj.id}, type: ${obj.type}) from the sidebar`);
               }}
               style={{
