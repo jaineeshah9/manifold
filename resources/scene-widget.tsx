@@ -87,9 +87,41 @@ export default function SceneWidget() {
   const rafRef       = useRef<number>(0);
   const meshMapRef   = useRef<Record<string, THREE.Mesh>>({});
   const propsRef     = useRef<Props | null>(null);
+  // Track whether we've already auto-fit this scene; reset when scene clears
+  const hasFitRef    = useRef<boolean>(false);
 
   // Local selection state (mirrors state.selectedObjectId)
   const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  // Fit camera to current scene meshes bounding box
+  function fitCamera() {
+    const camera = cameraRef.current;
+    const controls = controlsRef.current;
+    if (!camera || !controls) return;
+
+    const meshes = Object.values(meshMapRef.current);
+    if (meshes.length === 0) return;
+
+    const box = new THREE.Box3();
+    for (const mesh of meshes) box.expandByObject(mesh);
+    if (box.isEmpty()) return;
+
+    const center = box.getCenter(new THREE.Vector3());
+    const size   = box.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z);
+    const fovRad = camera.fov * (Math.PI / 180);
+    // Distance needed so the scene fits in the vertical FOV, with padding
+    const dist = Math.abs(maxDim / 2 / Math.tan(fovRad / 2)) * 1.8;
+
+    camera.position.set(
+      center.x + dist * 0.5,
+      center.y + dist * 0.4,
+      center.z + dist * 0.8,
+    );
+    controls.target.copy(center);
+    controls.update();
+    camera.updateProjectionMatrix();
+  }
 
   // -------------------------------------------------------------------------
   // Init effect — runs once on mount
@@ -322,6 +354,15 @@ export default function SceneWidget() {
       line.userData.isConnection = true;
       scene.add(line);
     }
+
+    // Auto-fit camera: fire once when scene first gets objects, reset when it empties
+    const hasMeshes = Object.keys(meshMapRef.current).length > 0;
+    if (hasMeshes && !hasFitRef.current) {
+      fitCamera();
+      hasFitRef.current = true;
+    } else if (!hasMeshes) {
+      hasFitRef.current = false;
+    }
   }, [isPending, props]);
 
   // Sync selected highlight when state changes externally
@@ -370,8 +411,17 @@ export default function SceneWidget() {
           display: "flex",
           flexDirection: "column",
         }}>
-          <div style={{ padding: "8px 12px", background: "#0d0d1e", borderBottom: "1px solid #333", fontSize: 12, color: "#888", letterSpacing: "0.05em" }}>
-            OBJECTS ({objectList.length})
+          <div style={{ padding: "8px 12px", background: "#0d0d1e", borderBottom: "1px solid #333", fontSize: 12, color: "#888", letterSpacing: "0.05em", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <span>OBJECTS ({objectList.length})</span>
+            {objectList.length > 0 && (
+              <button
+                onClick={fitCamera}
+                title="Fit camera to scene"
+                style={{ background: "none", border: "1px solid #444", color: "#aaa", fontSize: 10, padding: "2px 6px", borderRadius: 3, cursor: "pointer" }}
+              >
+                Fit
+              </button>
+            )}
           </div>
 
           {objectList.length === 0 && (

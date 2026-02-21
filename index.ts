@@ -175,7 +175,6 @@ server.tool(
     name: "add_object",
     description: "Add a new 3D object to the scene. Input is { type, params }. Server stores a persistent scene graph and returns the new object id.",
     schema: addObjectSchema,
-    widget: { name: "scene-widget", invoking: "Adding object...", invoked: "Object added" },
   },
   async ({ type, params }) => {
     const defaultPos: Vec3 = { x: 0, y: 0, z: 0 };
@@ -185,10 +184,7 @@ server.tool(
     const { name, position, scale, color, width, height, depth, radius } = params;
 
     if (color && !isHexColor(color)) {
-      return widget({
-        props: sceneState,
-        output: error(`Invalid color "${color}". Use hex format e.g. #ff0000`),
-      });
+      return error(`Invalid color "${color}". Use hex format e.g. #ff0000`);
     }
 
     const id = nextId();
@@ -220,7 +216,7 @@ server.tool(
     }
 
     sceneState.objects[id] = obj;
-    return widget({ props: sceneState, output: object({ id }) });
+    return object({ id });
   }
 );
 
@@ -233,7 +229,6 @@ server.tool(
     name: "update_object",
     description: "Update an existing object by id. Input is { id, params } and all params fields are optional.",
     schema: updateObjectSchema,
-    widget: { name: "scene-widget", invoking: "Updating object...", invoked: "Object updated" },
   },
   async ({ id, params }) => {
     try {
@@ -241,10 +236,7 @@ server.tool(
       const { name, position, scale, color, width, height, depth, radius } = params;
 
       if (color && !isHexColor(color)) {
-        return widget({
-          props: sceneState,
-          output: error(`Invalid color "${color}". Use hex format e.g. #ff0000`),
-        });
+        return error(`Invalid color "${color}". Use hex format e.g. #ff0000`);
       }
 
       if (name !== undefined)     obj.name = name;
@@ -259,12 +251,9 @@ server.tool(
       if (radius !== undefined && "radius" in obj) (obj as { radius: number }).radius = radius;
 
       sceneState.objects[id] = obj;
-      return widget({ props: sceneState, output: object({ id }) });
+      return object({ id });
     } catch (e) {
-      return widget({
-        props: sceneState,
-        output: error(e instanceof Error ? e.message : String(e)),
-      });
+      return error(e instanceof Error ? e.message : String(e));
     }
   }
 );
@@ -281,7 +270,6 @@ server.tool(
       id: z.string().describe("Object ID to delete"),
     }),
     annotations: { destructiveHint: true },
-    widget: { name: "scene-widget", invoking: "Deleting object...", invoked: "Object deleted" },
   },
   async ({ id }) => {
     try {
@@ -290,12 +278,9 @@ server.tool(
       sceneState.connections = sceneState.connections.filter(
         (c) => c.from_id !== id && c.to_id !== id
       );
-      return widget({ props: sceneState, output: text(`Deleted object "${id}"`) });
+      return text(`Deleted object "${id}"`);
     } catch (e) {
-      return widget({
-        props: sceneState,
-        output: error(e instanceof Error ? e.message : String(e)),
-      });
+      return error(e instanceof Error ? e.message : String(e));
     }
   }
 );
@@ -314,7 +299,6 @@ server.tool(
       to_id: z.string().describe("ID of the anchor object"),
       face_b: faceSchema.describe("Face on the to object"),
     }),
-    widget: { name: "scene-widget", invoking: "Connecting objects...", invoked: "Connected" },
   },
   async ({ from_id, face_a, to_id, face_b }) => {
     try {
@@ -324,13 +308,9 @@ server.tool(
       const newPos = computeConnectPos(fromObj, face_a, toObj, face_b);
       sceneState.objects[from_id] = { ...fromObj, position: newPos };
       sceneState.connections.push({ from_id, face_a, to_id, face_b });
-
-      return widget({ props: sceneState, output: object({ from_id, new_position: newPos }) });
+      return object({ from_id, new_position: newPos });
     } catch (e) {
-      return widget({
-        props: sceneState,
-        output: error(e instanceof Error ? e.message : String(e)),
-      });
+      return error(e instanceof Error ? e.message : String(e));
     }
   }
 );
@@ -345,12 +325,11 @@ server.tool(
     description: "Remove all objects and connections from the scene and reset the ID counter",
     schema: z.object({}),
     annotations: { destructiveHint: true },
-    widget: { name: "scene-widget", invoking: "Clearing scene...", invoked: "Scene cleared" },
   },
   async () => {
     sceneState = { objects: {}, connections: [] };
     idCounter = 1;
-    return widget({ props: sceneState, output: text("Scene cleared") });
+    return text("Scene cleared");
   }
 );
 
@@ -365,16 +344,12 @@ server.tool(
     schema: z.object({
       code: z.string().describe("JavaScript code to execute. Mutate `scene` to change the scene state."),
     }),
-    widget: { name: "scene-widget", invoking: "Running code...", invoked: "Code executed" },
   },
   async ({ code }) => {
     if (process.env.ENABLE_EXECUTE_CODE !== "true") {
-      return widget({
-        props: sceneState,
-        output: error(
-          "execute_code is disabled by default. Set ENABLE_EXECUTE_CODE=true to enable it (not recommended for production)."
-        ),
-      });
+      return error(
+        "execute_code is disabled by default. Set ENABLE_EXECUTE_CODE=true to enable it (not recommended for production)."
+      );
     }
 
     const ctx = vm.createContext({
@@ -384,17 +359,13 @@ server.tool(
 
     try {
       vm.runInContext(code, ctx, { timeout: 1000 });
-      // Merge only the allowlisted fields back into sceneState
       sceneState = {
         objects: ctx.scene.objects ?? sceneState.objects,
         connections: ctx.scene.connections ?? sceneState.connections,
       };
-      return widget({ props: sceneState, output: object({ result: "Code executed successfully" }) });
+      return object({ result: "Code executed successfully" });
     } catch (e) {
-      return widget({
-        props: sceneState,
-        output: error(e instanceof Error ? e.message : String(e)),
-      });
+      return error(e instanceof Error ? e.message : String(e));
     }
   }
 );
