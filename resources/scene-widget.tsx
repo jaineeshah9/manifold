@@ -69,7 +69,7 @@ function makeGeometry(THREE: typeof import("three"), obj: SceneObject): THREETyp
 // ---------------------------------------------------------------------------
 
 export default function SceneWidget() {
-  const { props, isPending, state, setState, sendFollowUpMessage } =
+  const { props, isPending, state, setState } =
     useWidget<Props, WidgetState>();
 
   const [threeError, setThreeError] = useState<string | null>(null);
@@ -292,7 +292,6 @@ export default function SceneWidget() {
                 if (sceneObj) {
                   setSelectedId(id);
                   setState((prev) => ({ ...(prev ?? {}), selectedObjectId: id }));
-                  sendFollowUpMessage(`I clicked on "${sceneObj.name}" (id: ${id}, type: ${sceneObj.type})`);
                 }
                 return;
               }
