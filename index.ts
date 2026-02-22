@@ -417,7 +417,7 @@ server.tool(
   {
     name: "execute_code",
     description:
-      "Run sandboxed JavaScript to batch-edit the scene state (mutate `scene`, then it's merged back). Call get_scene_state to show it in the widget.",
+      "USE WITH CAUTION ONLY WHEN NECESSARY. Run sandboxed JavaScript to batch-edit the scene state (mutate `scene`, then it's merged back). Call get_scene_state to show it in the widget.",
     schema: z.object({
       code: z.string().describe("JavaScript code to execute. Mutate `scene` to change the scene state."),
     }),
