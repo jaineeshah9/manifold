@@ -523,7 +523,6 @@ export default function SceneWidget() {
               onClick={() => {
                 setSelectedId(obj.id);
                 setState((prev) => ({ ...(prev ?? {}), selectedObjectId: obj.id }));
-                sendFollowUpMessage(`I selected "${obj.name}" (id: ${obj.id}, type: ${obj.type}) from the sidebar`);
               }}
               style={{
                 padding: "8px 12px",
